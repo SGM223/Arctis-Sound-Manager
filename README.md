@@ -25,7 +25,7 @@ A Linux GUI for SteelSeries Arctis headsets — device settings, 4-channel audio
   <em>▶ Click to watch the full demo</em>
 </p>
 
-**Supported Arctis headsets on Linux:** Arctis Nova Pro Wireless, Arctis Nova Pro Wired, Arctis Nova Pro Omni, Arctis Nova Elite, Arctis Nova 7 (Gen 1 & Gen 2), Arctis Nova 7P, Arctis Nova 5 / 5X, Arctis Nova 3 / 3P / 3X, Arctis 7, Arctis 7+, Arctis 9 Wireless, Arctis Pro Wireless, Arctis 1 / 7X / 7P Wireless, and Arctis GameBuds / GameBuds X — full list with Product IDs in [Supported devices](#supported-devices).
+**Supported Arctis headsets on Linux:** Arctis Nova Pro Wireless, Arctis Nova Pro Wired, Arctis Nova Pro Omni, Arctis Nova Elite, Arctis Nova 7 (Gen 1 & Gen 2), Arctis Nova 7P, Arctis Nova 5 / 5X, Arctis Nova 3 / 3P / 3X, Arctis 7, Arctis 7+, Arctis 9 Wireless, Arctis 5, Arctis Pro Wireless, Arctis 1 / 7X / 7P Wireless, and Arctis GameBuds / GameBuds X — full list with Product IDs in [Supported devices](#supported-devices).
 
 > 🎚️ **[ASM Presets](https://loteran.github.io/asm-presets/)** — browse and share community EQ presets!
 > 🎨 **[ASM Themes](https://loteran.github.io/asm-presets/)** — browse and share color themes, previewed on a miniature of the app!
@@ -169,6 +169,7 @@ A Linux GUI for SteelSeries Arctis headsets — device settings, 4-channel audio
 | Device | Working | Users | Product ID(s) |
 |---|---|---|---|
 | Arctis 1 / 7X / 7P Wireless | ✅ | 6 | $\color{royalblue}{\textbf{12b3}}$, 12b6, $\color{royalblue}{\textbf{12d5}}$, $\color{royalblue}{\textbf{12d7}}$ |
+| Arctis 5 | ✅ | 1 | $\color{royalblue}{\textbf{12aa}}$ |
 | Arctis 7 / 7 2019 / Pro 2019 / Pro GameDAC | ✅ | 16 | $\color{royalblue}{\textbf{1260}}$, $\color{royalblue}{\textbf{12ad}}$, $\color{royalblue}{\textbf{1252}}$, $\color{royalblue}{\textbf{1280}}$ |
 | Arctis 7+ / PS5 / Xbox / Destiny | ✅ | 27 | $\color{royalblue}{\textbf{220e}}$, $\color{royalblue}{\textbf{2212}}$, $\color{royalblue}{\textbf{2216}}$, 2236 |
 | Arctis 9 Wireless | ✅ | 15 | $\color{royalblue}{\textbf{12c2}}$ |

@@ -1,0 +1,61 @@
+# SteelSeries Arctis 5 (wired) — USB headset with the ChatMix dial box.
+#
+# Reverse-engineered on real hardware (0x1038:0x12aa) rather than copied from
+# the Arctis 7 profile: the 7's command set is refused by this device.
+#
+# What the probing found:
+#
+# * One HID interface (5), interrupt IN endpoint only — no interrupt OUT, so
+#   commands must go over the control pipe (ctrl_output / SET_REPORT).
+# * Numbered HID reports. Output report 0x04 (38 bytes) accepts writes;
+#   report 0x06 does not (write stalls). The device answers on input report
+#   0x05 (34 bytes), but the frames carry audio-level telemetry, not state —
+#   every classic query (0x0618 battery, 0x0624 ChatMix, 0xb0/0x01b0 status)
+#   returns the same telemetry shape or nothing, and nothing on the device
+#   was observed to change in response to any command.
+# * All user controls are hardware: the mic mute is a locking switch, the
+#   headset volume is an analog slider, the ChatMix dial is a potentiometer
+#   in the USB box. There is no battery (wired).
+#
+# So this profile's job is recognition and routing: the audio half (virtual
+# Game/Chat/Media channels, Sonar EQ, HeSuVi, the router) needs no HID
+# conversation at all. No settings and no status are declared on purpose —
+# the GUI builds empty Headset/DAC pages from whatever the profile declares,
+# and there is nothing software-controllable here to put on them. Wired also
+# means always online, so no online_status block either.
+#
+# The two ALSA PCMs are analog-game and analog-chat, *both stereo* — the
+# generic sink classifier told them apart only by channel count, so
+# get_arctis_sinks_classified() now also consults the node.name suffix. This
+# is what keeps Game and Chat on their own PCMs, which the ChatMix dial
+# mixes in hardware.
+device:
+  name: SteelSeries Arctis 5
+  vendor_id: 0x1038
+  product_ids:
+    - 0x12aa # Arctis 5
+
+  # Report 0x04 data length is 38 bytes; the report id byte rides as the
+  # first byte of every command, so a full SET_REPORT payload is 39. No
+  # command is currently sent — declared for correctness and for anyone who
+  # later finds a live command to add.
+  command_padding:
+    length: 39
+    position: end
+    filler: 0x00
+
+  # Commands go over the control pipe as HID SET_REPORT to numbered report
+  # 0x04; the kernel driver on interface 5 is detached and the interface
+  # claimed exactly like every other profile, but nothing is ever written.
+  command_transport: ctrl_output
+  command_report_id: 0x04
+  command_interface_index: [5, 0]
+  listen_interface_indexes: [5]
+
+  # No device_init: there is nothing to configure.
+  # No status: nothing to poll — no battery, no software ChatMix, no mic state.
+  # No settings: the controls are hardware.
+  # No hardware_eq: the Arctis 5 has no on-device EQ.
+
+  audio:
+    spatial_engine: hesuvi

@@ -137,14 +137,25 @@ class PulseAudioManager:
         if not sinks:
             return None, None
 
-        # Prefer explicit node.name suffix, fall back to channel count
+        # Prefer explicit node.name suffix, fall back to channel count. The
+        # Arctis 5 exposes two *stereo* PCMs named analog-game/analog-chat
+        # (ALSA UCM profile-set steelseries-arctis-common-usb-audio), so
+        # channel count alone cannot tell them apart — the name must be
+        # consulted before it, or both halves land on the first stereo sink
+        # and the ChatMix dial has nothing left to mix.
         game = next(
             (s for s in sinks if s.proplist.get('node.name', '').endswith('pro-output-1')),
+            None,
+        ) or next(
+            (s for s in sinks if s.proplist.get('node.name', '').endswith('analog-game')),
             None,
         ) or next((s for s in sinks if getattr(s, 'channel_count', 0) == 2), None)
 
         chat = next(
             (s for s in sinks if s.proplist.get('node.name', '').endswith('pro-output-0')),
+            None,
+        ) or next(
+            (s for s in sinks if s.proplist.get('node.name', '').endswith('analog-chat')),
             None,
         ) or next((s for s in sinks if getattr(s, 'channel_count', 0) == 1), None)
 
