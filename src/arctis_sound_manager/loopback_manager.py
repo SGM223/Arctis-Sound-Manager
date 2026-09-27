@@ -14,12 +14,14 @@ Routing overview (unchanged from static config):
     App → Arctis_<Ch> (capture / Audio/Sink) → [loopback] → Arctis_<Ch>_sink_out
          → effect_input.sonar-<ch>-eq (filter-chain) → ... → physical output
 
-The loopbacks carry stereo (FL FR) on both sides. The 8-channel layout
-(FL FR FC LFE RL RR SL SR) downstream is filled by the HeSuVi chain's own
-matrix synthesizer, not by PipeWire: a virtual node that merely *claims* more
-channels gets no generated signal — measured on this exact graph (the six
-non-front EQ channels stay silent). ``stream.dont-remix=false`` is kept so
-the playback stream may be linked into the 8-channel EQ at all.
+In Sonar mode the spatial channels (game/media/aux) carry the 7.1 layout
+(FL FR FC LFE RL RR SL SR) on both sides, so applications can deliver
+discrete surround and the HeSuVi chain convolves it. Chat is voice and stays
+stereo (FL FR). PipeWire still does not upmix: a stereo source leaves the
+surround channels silent, which the HeSuVi chain's matrix synthesizer fills
+(see sonar_to_pipewire._HESUVI_SYNTH and the upmix_stereo setting).
+``stream.dont-remix=false`` is kept so the playback stream may be linked
+into the 8-channel EQ at all.
 
 This module is intentionally pure: no device_state access, no file I/O, no import-
 time side effects.  Callers (e.g. core.py) are responsible for resolving targets and
@@ -178,6 +180,10 @@ class LoopbackSpec:
         output in simple mode).
     description:
         Human-readable label shown in audio control panels (``node.description``).
+    channels, position:
+        Channel layout both sides of the loopback advertise. The Sonar-mode
+        spatial channels carry the 7.1 layout so games and players can deliver
+        discrete surround (see make_specs); chat and simple mode stay stereo.
     """
 
     channel: str
@@ -185,6 +191,8 @@ class LoopbackSpec:
     playback_name: str
     target: str
     description: str
+    channels: int = 2
+    position: str = "[FL FR]"
 
 
 # ── Pre-defined sink table (mirrors _VIRTUAL_SINKS in sonar_to_pipewire.py) ──
@@ -234,12 +242,14 @@ OPTIONAL_CHANNELS = ("aux",)
 def _build_pw_loopback_argv(spec: LoopbackSpec) -> list[str]:
     """Build the ``pw-loopback`` argv for *spec*.
 
-    The capture side is always 2ch [FL FR] with ``media.class=Audio/Sink``
-    so that applications can route audio to it.  The playback side carries
-    ``target.object`` (WirePlumber >= 0.5) plus ``node.target`` (0.4.x compat),
-    ``stream.dont-remix=false`` (kept so the stream may be linked into the
-    8-channel EQ at all), and the standard linger/fallback flags used
-    throughout this project.
+    Both sides advertise the spec's channel layout (``spec.channels`` /
+    ``spec.position``): 7.1 for Sonar-mode spatial channels so games and
+    players can deliver discrete surround, stereo for chat and simple mode.
+    The capture side is the visible ``media.class=Audio/Sink`` applications
+    route to; the playback side carries ``target.object`` (WirePlumber >= 0.5)
+    plus ``node.target`` (0.4.x compat), ``stream.dont-remix=false`` (kept so
+    the stream may be linked into the 8-channel EQ at all), and the standard
+    linger/fallback flags used throughout this project.
 
     The props string format is the ``key=value`` space-separated form accepted
     by ``pw-loopback --capture-props`` / ``--playback-props``.
@@ -248,10 +258,10 @@ def _build_pw_loopback_argv(spec: LoopbackSpec) -> list[str]:
 
         pw-loopback
           --capture-props='node.name=Arctis_Media media.class=Audio/Sink
-                           audio.channels=2 audio.position=[FL FR]'
+                           audio.channels=8 audio.position=[FL FR FC LFE RL RR SL SR]'
           --playback-props='node.name=Arctis_Media_sink_out
                             node.description=Media
-                            audio.channels=2 audio.position=[FL FR]
+                            audio.channels=8 audio.position=[FL FR FC LFE RL RR SL SR]
                             stream.dont-remix=false
                             target.object=effect_input.sonar-media-eq
                             node.target=effect_input.sonar-media-eq
@@ -275,14 +285,14 @@ def _build_pw_loopback_argv(spec: LoopbackSpec) -> list[str]:
         f"node.name={spec.capture_name}"
         f' node.description="{spec.description}"'
         f" media.class=Audio/Sink"
-        f" audio.channels=2"
-        f" audio.position=[FL FR]"
+        f" audio.channels={spec.channels}"
+        f" audio.position={spec.position}"
     )
     playback_props = (
         f"node.name={spec.playback_name}"
         f' node.description="{spec.description}"'
-        f" audio.channels=2"
-        f" audio.position=[FL FR]"
+        f" audio.channels={spec.channels}"
+        f" audio.position={spec.position}"
         f" stream.dont-remix=false"
         # WirePlumber >= 0.5 resolves target.object (object.serial / node.name
         # lookup) with priority over node.target; without it the stream can be
@@ -936,11 +946,19 @@ def make_specs(
             target = physical_chat
         else:
             target = physical_game
+        # Sonar mode's spatial channels advertise the 7.1 layout so games and
+        # players can deliver discrete surround — the HeSuVi chain convolves
+        # it, and the matrix synthesizer fills the silent channels for stereo
+        # sources. Chat is voice and has no surround stage; simple mode has no
+        # virtualization to feed, so both stay stereo.
+        surround = sonar and sink["channel"] != "chat"
         specs.append(LoopbackSpec(
             channel=sink["channel"],
             capture_name=sink["capture_name"],
             playback_name=sink["playback_name"],
             target=target,
             description=f"{device_name} {sink['description']}",
+            channels=8 if surround else 2,
+            position="[FL FR FC LFE RL RR SL SR]" if surround else "[FL FR]",
         ))
     return specs

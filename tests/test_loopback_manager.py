@@ -167,18 +167,31 @@ class TestBuildArgv:
         argv = _build_pw_loopback_argv(media_spec)
         assert "media.class=Audio/Sink" in argv[1]
 
-    def test_capture_channels_2(self, media_spec: LoopbackSpec) -> None:
+    def test_default_spec_stays_stereo(self, media_spec: LoopbackSpec) -> None:
         argv = _build_pw_loopback_argv(media_spec)
         assert "audio.channels=2" in argv[1]
-
-    def test_capture_position_fl_fr(self, media_spec: LoopbackSpec) -> None:
-        argv = _build_pw_loopback_argv(media_spec)
         assert "audio.position=[FL FR]" in argv[1]
 
-    def test_capture_no_8ch(self, media_spec: LoopbackSpec) -> None:
-        """The capture side must never declare 8ch — PipeWire negotiates it."""
-        argv = _build_pw_loopback_argv(media_spec)
-        assert "audio.channels=8" not in argv[1]
+    def test_surround_spec_advertises_7_1_on_both_sides(self, media_spec: LoopbackSpec) -> None:
+        """Sonar-mode spatial channels declare the 7.1 layout so applications
+        can deliver discrete surround, which the HeSuVi chain convolves. Both
+        sides must declare it — PipeWire does not upmix a virtual node that
+        merely claims eight channels (measured: the extra channels stay
+        silent), so the capture side applications see has to advertise it."""
+        surround = LoopbackSpec(
+            channel=media_spec.channel,
+            capture_name=media_spec.capture_name,
+            playback_name=media_spec.playback_name,
+            target=media_spec.target,
+            description=media_spec.description,
+            channels=8,
+            position="[FL FR FC LFE RL RR SL SR]",
+        )
+        argv = _build_pw_loopback_argv(surround)
+        assert "audio.channels=8" in argv[1]
+        assert "audio.position=[FL FR FC LFE RL RR SL SR]" in argv[1]
+        assert "audio.channels=8" in argv[2]
+        assert "audio.position=[FL FR FC LFE RL RR SL SR]" in argv[2]
 
     # ── playback-props content ─────────────────────────────────────────────
 
@@ -505,6 +518,22 @@ class TestMakeSpecs:
     def test_returns_three_specs(self) -> None:
         specs = make_specs(sonar=True, physical_game=self.PHYS_GAME, physical_chat=self.PHYS_CHAT)
         assert len(specs) == 3
+
+    def test_sonar_spatial_channels_advertise_7_1(self) -> None:
+        specs = make_specs(sonar=True, physical_game=self.PHYS_GAME, physical_chat=self.PHYS_CHAT)
+        for name in ("game", "media"):
+            spec = next(s for s in specs if s.channel == name)
+            assert (spec.channels, spec.position) == (8, "[FL FR FC LFE RL RR SL SR]")
+
+    def test_chat_stays_stereo_in_sonar_mode(self) -> None:
+        specs = make_specs(sonar=True, physical_game=self.PHYS_GAME, physical_chat=self.PHYS_CHAT)
+        chat = next(s for s in specs if s.channel == "chat")
+        assert (chat.channels, chat.position) == (2, "[FL FR]")
+
+    def test_simple_mode_stays_stereo(self) -> None:
+        """No HeSuVi chain to feed, so nothing is gained by advertising 7.1."""
+        specs = make_specs(sonar=False, physical_game=self.PHYS_GAME, physical_chat=self.PHYS_CHAT)
+        assert all(s.channels == 2 for s in specs)
 
     def test_channel_names(self) -> None:
         specs = make_specs(sonar=True, physical_game=self.PHYS_GAME, physical_chat=self.PHYS_CHAT)

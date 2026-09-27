@@ -311,7 +311,12 @@ def _conf_has_bare_ladspa(content: str) -> bool:
 #       rule above, and the HeSuVi conf is exactly the one this marker
 #       force-regenerates, so every existing install picks the synthesizer
 #       up on the next daemon pass.
-_CONF_VERSION = 5
+#   6 — the Sonar-mode spatial loopbacks advertise the 7.1 layout (8ch, both
+#       sides) so games and players can deliver discrete surround, and the
+#       matrix synthesizer is gated by the new upmix_stereo setting (off =
+#       pass the graph's own channels through untouched). Capture/playback
+#       props changed → a shape change by the rule above.
+_CONF_VERSION = 6
 
 _CONF_VERSION_RE = re.compile(r"^\s*#\s*ASM-CONF-VERSION:\s*(\d+)\s*$", re.MULTILINE)
 
@@ -435,6 +440,23 @@ def _load_compensation_id() -> str:
     except Exception as exc:  # noqa: BLE001
         _log.debug("Could not read compensation_id: %s", exc)
         return "none"
+
+
+def _load_upmix_stereo() -> bool:
+    """Whether the matrix synthesizer should fill silent surround channels.
+
+    True (default): stereo sources sound every virtual speaker — the
+    synthesizer derives centre/surrounds from FL/FR. False: the graph's own
+    channels pass through untouched, which is what a source that already
+    delivers 5.1/7.1 wants; the Sonar-mode sinks advertise the 7.1 layout,
+    so such sources exist. Same file-based read as the other profile helpers.
+    """
+    try:
+        from arctis_sound_manager.settings import GeneralSettings
+        return bool(GeneralSettings.read_from_file().upmix_stereo)
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("Could not read upmix_stereo: %s", exc)
+        return True
 
 
 def _compensation_dest_for(channel: str) -> Path | None:
@@ -3765,13 +3787,12 @@ def ensure_spatial_eq_links(
     path links an **8ch** EQ output to the **2ch** physical output. This is
     done with ``ensure_loopback_link``, which creates explicit *channel-matched
     pw-link* connections (FL→FL, FR→FR) — it does NOT route through an
-    adapter that channel-mixes 8→2, so the extra channels are simply dropped
-    rather than folded back in by a downmix matrix. Those extra channels are
-    silent anyway: the loopbacks carry stereo and PipeWire generates nothing
-    for a virtual node that merely claims more channels (measured — the
-    surround matrix that fills FC/LFE/RL/RR/SL/SR lives in the HeSuVi chain,
-    see _HESUVI_SYNTH, and is not in the OFF path at all). So the round-trip
-    in OFF is loopback-2ch → EQ-FL/FR → physical-FL/FR, i.e. clean stereo.
+    adapter that channel-mixes 8→2. Since the Sonar-mode sinks advertise the
+    7.1 layout, those extra channels can carry *real* content (a film's
+    centre channel), so ``fold_unmatched_into_front()`` sums them into the
+    front pair instead of dropping them. Stereo sources leave them silent,
+    so the common-case round-trip stays loopback-8ch(FL/FR) → EQ-FL/FR →
+    physical-FL/FR, i.e. clean stereo.
 
     Parameters
     ----------
@@ -3790,7 +3811,9 @@ def ensure_spatial_eq_links(
         its target is not yet up (filter-chain starting/restarting, or no
         device attached) — treat as "retry later", not an error.
     """
-    from arctis_sound_manager.pw_utils import ensure_loopback_link, pw_node_exists
+    from arctis_sound_manager.pw_utils import (
+        ensure_loopback_link, fold_unmatched_into_front, pw_node_exists,
+    )
 
     # None means "whatever carries a spatial chain right now", which is what
     # every caller wanted — spelling it as a default argument would freeze the
@@ -3845,6 +3868,13 @@ def ensure_spatial_eq_links(
             continue
         playback_name = f"effect_output.sonar-{channel}-eq"
         results[channel] = ensure_loopback_link(playback_name, target, data=data)
+        if results[channel] and not enabled:
+            # Spatial OFF: the Sonar-mode EQs still carry the 7.1 layout, so
+            # the name-matched link above keeps only FL/FR. Fold the rest into
+            # the front pair rather than dropping real content (a film's
+            # centre channel) — a no-op for stereo sources, whose extra
+            # channels are silent.
+            fold_unmatched_into_front(playback_name, target, data=data)
     return results
 
 
@@ -4292,6 +4322,7 @@ def generate_hesuvi_conf(
 
     immersion_db = immersion_pct / 100.0 * 12.0
     distance_wet = distance_pct / 100.0
+    upmix_stereo = _load_upmix_stereo()
 
     # ── Nodes ────────────────────────────────────────────────────────────
     node_lines: list[str] = []
@@ -4305,18 +4336,21 @@ def generate_hesuvi_conf(
     # 1b. Surround synthesizer — stereo sources → 7.1 matrix (see _HESUVI_SYNTH).
     #     Feeds gainFC/gainSL/… instead of the (silent) copy nodes for those
     #     channels, so a stereo source still drives all six surround convolvers.
-    node_lines.append(f"{I}# surround synthesizer (stereo sources → 7.1 matrix)")
-    for _syn_name, _gfl, _gfr, _syn_delay in _HESUVI_SYNTH:
-        node_lines.append(
-            f'{I}{{ type = builtin  label = mixer  name = syn{_syn_name}'
-            f'  control = {{ "Gain 1" = {_gfl}  "Gain 2" = {_gfr} }} }}'
-        )
-        if _syn_delay:
+    #     With upmix_stereo off, the graph's own channels pass through — what a
+    #     source that already delivers 5.1/7.1 wants.
+    if upmix_stereo:
+        node_lines.append(f"{I}# surround synthesizer (stereo sources → 7.1 matrix)")
+        for _syn_name, _gfl, _gfr, _syn_delay in _HESUVI_SYNTH:
             node_lines.append(
-                f'{I}{{ type = builtin  label = delay  name = dly{_syn_name}'
-                f'  config = {{ "max-delay" = 0.05 }}'
-                f'  control = {{ "Delay (s)" = {_syn_delay} }} }}'
+                f'{I}{{ type = builtin  label = mixer  name = syn{_syn_name}'
+                f'  control = {{ "Gain 1" = {_gfl}  "Gain 2" = {_gfr} }} }}'
             )
+            if _syn_delay:
+                node_lines.append(
+                    f'{I}{{ type = builtin  label = delay  name = dly{_syn_name}'
+                    f'  config = {{ "max-delay" = 0.05 }}'
+                    f'  control = {{ "Delay (s)" = {_syn_delay} }} }}'
+                )
 
     # 2. Gain nodes (Immersion — bq_highshelf between copy and convolvers)
     node_lines.append(f"{I}# immersion gain")
@@ -4391,19 +4425,20 @@ def generate_hesuvi_conf(
     link_lines: list[str] = []
     L = "                    "  # indentation constant
 
-    # copy → gain links. FL/FR go straight through; the six non-front channels
-    # are fed from the synthesizer (delay node when one is configured), so the
-    # silent graph inputs never reach the convolvers.
-    link_lines.append(f"{L}# copy → synthesizer")
+    # copy → gain links. FL/FR always go straight through; with the matrix
+    # synthesizer on, the six non-front channels are fed from it (delay node
+    # where one is configured), otherwise they keep their own graph inputs.
     gain_sources = {"FL": "copyFL:Out", "FR": "copyFR:Out"}
-    for _syn_name, _gfl, _gfr, _syn_delay in _HESUVI_SYNTH:
-        link_lines.append(f'{L}{{ output = "copyFL:Out"  input = "syn{_syn_name}:In 1" }}')
-        link_lines.append(f'{L}{{ output = "copyFR:Out"  input = "syn{_syn_name}:In 2" }}')
-        if _syn_delay:
-            link_lines.append(f'{L}{{ output = "syn{_syn_name}:Out"  input = "dly{_syn_name}:In" }}')
-            gain_sources[_syn_name] = f"dly{_syn_name}:Out"
-        else:
-            gain_sources[_syn_name] = f"syn{_syn_name}:Out"
+    if upmix_stereo:
+        link_lines.append(f"{L}# copy → synthesizer")
+        for _syn_name, _gfl, _gfr, _syn_delay in _HESUVI_SYNTH:
+            link_lines.append(f'{L}{{ output = "copyFL:Out"  input = "syn{_syn_name}:In 1" }}')
+            link_lines.append(f'{L}{{ output = "copyFR:Out"  input = "syn{_syn_name}:In 2" }}')
+            if _syn_delay:
+                link_lines.append(f'{L}{{ output = "syn{_syn_name}:Out"  input = "dly{_syn_name}:In" }}')
+                gain_sources[_syn_name] = f"dly{_syn_name}:Out"
+            else:
+                gain_sources[_syn_name] = f"syn{_syn_name}:Out"
 
     link_lines.append(f"{L}# → immersion gain")
     for ch in _HESUVI_CHANNELS:

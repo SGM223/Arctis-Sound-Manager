@@ -318,6 +318,12 @@ class GeneralSettings(JsonSerializable):
     # (default) leaves the generated surround chain byte-identical.
     compensation_id: str | None = "none"
 
+    # Fill the HeSuVi chain's silent surround channels from FL/FR (the matrix
+    # synthesizer). Default on: stereo sources sound every virtual speaker.
+    # Turn off when the source already delivers 5.1/7.1 — the Sonar-mode
+    # channel sinks advertise the 7.1 layout, so those pass through untouched.
+    upmix_stereo: bool = True
+
     # Which microphone source feeds the Sonar Micro EQ capture (issue #131).
     # "__auto__" (default) = Arctis microphone, matches the issue #127
     # enforcement behaviour. "__manual__" = the watchdog stops enforcing the
@@ -469,6 +475,7 @@ class GeneralSettings(JsonSerializable):
         ConfigSetting('hrir_id', SettingType.SELECT, None, options_source='hrir_files', options_mapping={ 'value': 'id', 'label': 'name' }),
         ConfigSetting('speaker_hrir_id', SettingType.SELECT, None, options_source='hrir_files_speakers', options_mapping={ 'value': 'id', 'label': 'name' }),
         ConfigSetting('compensation_id', SettingType.SELECT, None, options_source='compensation_files', options_mapping={ 'value': 'id', 'label': 'name' }),
+        ConfigSetting('upmix_stereo', SettingType.TOGGLE, True, values={ 'on': True, 'off': False, 'off_label': 'off', 'on_label': 'on' }),
         ConfigSetting('micro_input_source', SettingType.SELECT, "__auto__", options_source='pulse_audio_sources', options_mapping={ 'value': 'id', 'label': 'name' }),
         ConfigSetting('micro_alt_source', SettingType.SELECT, "", options_source='pulse_audio_sources', options_mapping={ 'value': 'id', 'label': 'name' }),
         # option_requires_status: value -> live status key(s) the active device

@@ -1378,6 +1378,91 @@ def ensure_loopback_link(
         return False
 
 
+def fold_unmatched_into_front(
+    source_name: str, target_name: str, data: list | None = None,
+) -> int:
+    """Sum source channels the target does not expose into its FL/FR ports.
+
+    Sonar-mode loopbacks and EQs carry the full 7.1 layout. When Spatial Audio
+    is OFF and the destination is the 2ch headset, :func:`ensure_loopback_link`
+    keeps only the name-matched FL/FR — dropping real content (a 5.1 film's
+    dialogue lives in FC), not synthesised channels. PipeWire sums multiple
+    links into one input port, so the remaining source channels are folded
+    into the target's front pair here.
+
+    Port links carry no gain: this is a unity fold (the content a mixing
+    adapter would keep, without its −3 dB coefficients). Stereo sources are
+    unaffected — their extra channels are silent — so the OFF path stays
+    bit-clean for the common case. LFE is deliberately not folded: it is
+    usually a duplicate of the low end already present in the mains, and a
+    unity addition would double the bass where a calibrated downmix
+    attenuates it.
+
+    Idempotent, best-effort: returns the number of links created (0 when
+    everything is already in place, the source/target is absent, or the
+    target has no front pair).
+    """
+    fronts = ("FL", "FR")
+    try:
+        if data is None:
+            data = _pw_dump()
+        nodes_by_name = _index_nodes_by_name(data)
+        source_id = _resolve_unique_node_id(nodes_by_name, source_name, "fold_unmatched_into_front")
+        target_id = _resolve_unique_node_id(nodes_by_name, target_name, "fold_unmatched_into_front")
+        if source_id is None or target_id is None:
+            return 0
+
+        out_ports = _node_ports(data, source_id, "out")
+        in_ports = _node_ports(data, target_id, "in")
+        front_ports = [in_ports[ch] for ch in fronts if ch in in_ports]
+        if not front_ports:
+            return 0
+
+        existing: set[tuple[int, int]] = set()
+        for obj in data:
+            if not obj.get("type", "").endswith("Link"):
+                continue
+            props = obj.get("info", {}).get("props", {})
+            if props.get("link.output.node") != source_id:
+                continue
+            if props.get("link.input.node") == target_id:
+                existing.add((props.get("link.output.port"), props.get("link.input.port")))
+
+        created = 0
+        for channel, out_port in out_ports.items():
+            if channel in in_ports or channel == "LFE":
+                continue
+            for in_port in front_ports:
+                if (out_port, in_port) in existing:
+                    continue
+                r = _pw_run(["pw-link", str(out_port), str(in_port)],
+                            check=False, timeout=3, capture_output=True)
+                if r.returncode != 0:
+                    err = (r.stderr or b"").decode(errors="replace").strip()
+                    if _LINK_DENIED in err.lower() and grant_link_permissions(out_port, in_port):
+                        r = _pw_run(["pw-link", str(out_port), str(in_port)],
+                                    check=False, timeout=3, capture_output=True)
+                    if r.returncode != 0:
+                        logger.warning(
+                            "fold_unmatched_into_front: pw-link %s→%s (%s) failed: %s",
+                            out_port, in_port, channel,
+                            (r.stderr or b"").decode(errors="replace").strip(),
+                        )
+                        continue
+                created += 1
+                existing.add((out_port, in_port))
+
+        if created:
+            logger.info(
+                "fold_unmatched_into_front: '%s' → '%s' (%d channel links folded)",
+                source_name, target_name, created,
+            )
+        return created
+    except Exception as exc:  # noqa: BLE001 — best-effort repair, never fatal
+        logger.debug("fold_unmatched_into_front failed: %s", exc)
+        return 0
+
+
 def ensure_capture_link(
     source_name: str, capture_name: str, data: list | None = None,
 ) -> bool:
