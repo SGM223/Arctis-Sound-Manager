@@ -14,10 +14,12 @@ Routing overview (unchanged from static config):
     App → Arctis_<Ch> (capture / Audio/Sink) → [loopback] → Arctis_<Ch>_sink_out
          → effect_input.sonar-<ch>-eq (filter-chain) → ... → physical output
 
-The 8-channel negotiation (FL FR FC LFE RL RR SL SR) happens automatically when
-PipeWire links the loopback playback port to an 8-channel EQ node; we only need to
-tell PipeWire *not* to remix (``stream.dont-remix=false`` allows it, because the
-default would prevent PipeWire from expanding 2ch to 8ch).
+The loopbacks carry stereo (FL FR) on both sides. The 8-channel layout
+(FL FR FC LFE RL RR SL SR) downstream is filled by the HeSuVi chain's own
+matrix synthesizer, not by PipeWire: a virtual node that merely *claims* more
+channels gets no generated signal — measured on this exact graph (the six
+non-front EQ channels stay silent). ``stream.dont-remix=false`` is kept so
+the playback stream may be linked into the 8-channel EQ at all.
 
 This module is intentionally pure: no device_state access, no file I/O, no import-
 time side effects.  Callers (e.g. core.py) are responsible for resolving targets and
@@ -235,9 +237,9 @@ def _build_pw_loopback_argv(spec: LoopbackSpec) -> list[str]:
     The capture side is always 2ch [FL FR] with ``media.class=Audio/Sink``
     so that applications can route audio to it.  The playback side carries
     ``target.object`` (WirePlumber >= 0.5) plus ``node.target`` (0.4.x compat),
-    ``stream.dont-remix=false`` (which lets PipeWire expand
-    2→8ch when linking to an 8ch EQ node), and the standard linger/fallback
-    flags used throughout this project.
+    ``stream.dont-remix=false`` (kept so the stream may be linked into the
+    8-channel EQ at all), and the standard linger/fallback flags used
+    throughout this project.
 
     The props string format is the ``key=value`` space-separated form accepted
     by ``pw-loopback --capture-props`` / ``--playback-props``.

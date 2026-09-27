@@ -303,7 +303,15 @@ def _conf_has_bare_ladspa(content: str) -> bool:
 #       this mechanism exists to prevent. _ensure_passive_playback() therefore
 #       repairs those in place, inserting the one missing line and touching
 #       nothing else.
-_CONF_VERSION = 4
+#   5 — the HeSuVi surround chain gained its matrix surround synthesizer
+#       (mixer/delay nodes, _HESUVI_SYNTH). The loopbacks are stereo and
+#       PipeWire does not upmix a virtual node on its own, so the six
+#       non-front convolver inputs used to carry silence — the chain was a
+#       two-front-speaker HRTF. New nodes and links → a shape change by the
+#       rule above, and the HeSuVi conf is exactly the one this marker
+#       force-regenerates, so every existing install picks the synthesizer
+#       up on the next daemon pass.
+_CONF_VERSION = 5
 
 _CONF_VERSION_RE = re.compile(r"^\s*#\s*ASM-CONF-VERSION:\s*(\d+)\s*$", re.MULTILINE)
 
@@ -3757,17 +3765,13 @@ def ensure_spatial_eq_links(
     path links an **8ch** EQ output to the **2ch** physical output. This is
     done with ``ensure_loopback_link``, which creates explicit *channel-matched
     pw-link* connections (FL→FL, FR→FR) — it does NOT route through an
-    adapter that channel-mixes 8→2. That distinction is what keeps OFF-mode
-    stereo bit-clean and avoids any regression versus the old 2ch-EQ OFF path:
-    PipeWire's 2→8 upmix (which fills the EQ's 8 channels from the 2ch
-    loopback) never alters the passthrough front channels — FL/FR always carry
-    the original L/R at unity — and any synthesised centre/surround content it
-    adds to FC/LFE/RL/RR/SL/SR is simply *dropped* here (those source channels
-    have no matching port on the 2ch target), rather than folded back in by a
-    downmix matrix. So the round-trip in OFF is loopback-2ch → EQ-FL/FR →
-    physical-FL/FR, i.e. clean stereo. (An adapter 8→2 downmix of the
-    psd-upmixed signal WOULD colour the sound — center/surround re-summed —
-    which is exactly why we link channel-matched, not through a downmixer.)
+    adapter that channel-mixes 8→2, so the extra channels are simply dropped
+    rather than folded back in by a downmix matrix. Those extra channels are
+    silent anyway: the loopbacks carry stereo and PipeWire generates nothing
+    for a virtual node that merely claims more channels (measured — the
+    surround matrix that fills FC/LFE/RL/RR/SL/SR lives in the HeSuVi chain,
+    see _HESUVI_SYNTH, and is not in the OFF path at all). So the round-trip
+    in OFF is loopback-2ch → EQ-FL/FR → physical-FL/FR, i.e. clean stereo.
 
     Parameters
     ----------
@@ -4168,6 +4172,26 @@ def ensure_micro_capture_link(data: list | None = None) -> bool:
 
 _HESUVI_CHANNELS = ("FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR")
 
+# Surround synthesizer matrix: (speaker, FL gain, FR gain, delay in seconds).
+#
+# The channel sinks are stereo, so the six non-front inputs of this graph carry
+# silence. PipeWire never fills them for us: a virtual node that merely claims
+# more channels gets no generated signal — measured on this graph, see the
+# note in loopback_manager.py. Without this stage the six surround/LFE
+# convolvers convolve silence and Spatial Audio is a two-front-speaker HRTF.
+#
+# Rules are Pro Logic-flavoured: centre from the mono sum, sides/rears from the
+# L−R difference with different delays so the two pairs decorrelate. LFE is
+# deliberately absent — it maps to the centre HRIR anyway, so driving it from
+# the same sum would just double the centre bass.
+_HESUVI_SYNTH = [
+    ("FC",  0.5,  0.5, 0.0),
+    ("SL",  0.5, -0.5, 0.012),
+    ("SR", -0.5,  0.5, 0.012),
+    ("RL",  0.5, -0.5, 0.022),
+    ("RR", -0.5,  0.5, 0.022),
+]
+
 # Convolver definitions: (name, hrir channel index)
 # Order matches the static config exactly.
 _HESUVI_CONVOLVERS = [
@@ -4278,6 +4302,22 @@ def generate_hesuvi_conf(
     for ch in _HESUVI_CHANNELS:
         node_lines.append(f'{I}{{ type = builtin  label = copy  name = copy{ch} }}')
 
+    # 1b. Surround synthesizer — stereo sources → 7.1 matrix (see _HESUVI_SYNTH).
+    #     Feeds gainFC/gainSL/… instead of the (silent) copy nodes for those
+    #     channels, so a stereo source still drives all six surround convolvers.
+    node_lines.append(f"{I}# surround synthesizer (stereo sources → 7.1 matrix)")
+    for _syn_name, _gfl, _gfr, _syn_delay in _HESUVI_SYNTH:
+        node_lines.append(
+            f'{I}{{ type = builtin  label = mixer  name = syn{_syn_name}'
+            f'  control = {{ "Gain 1" = {_gfl}  "Gain 2" = {_gfr} }} }}'
+        )
+        if _syn_delay:
+            node_lines.append(
+                f'{I}{{ type = builtin  label = delay  name = dly{_syn_name}'
+                f'  config = {{ "max-delay" = 0.05 }}'
+                f'  control = {{ "Delay (s)" = {_syn_delay} }} }}'
+            )
+
     # 2. Gain nodes (Immersion — bq_highshelf between copy and convolvers)
     node_lines.append(f"{I}# immersion gain")
     for ch in _HESUVI_CHANNELS:
@@ -4351,10 +4391,24 @@ def generate_hesuvi_conf(
     link_lines: list[str] = []
     L = "                    "  # indentation constant
 
-    # copy → gain links
-    link_lines.append(f"{L}# copy → gain")
+    # copy → gain links. FL/FR go straight through; the six non-front channels
+    # are fed from the synthesizer (delay node when one is configured), so the
+    # silent graph inputs never reach the convolvers.
+    link_lines.append(f"{L}# copy → synthesizer")
+    gain_sources = {"FL": "copyFL:Out", "FR": "copyFR:Out"}
+    for _syn_name, _gfl, _gfr, _syn_delay in _HESUVI_SYNTH:
+        link_lines.append(f'{L}{{ output = "copyFL:Out"  input = "syn{_syn_name}:In 1" }}')
+        link_lines.append(f'{L}{{ output = "copyFR:Out"  input = "syn{_syn_name}:In 2" }}')
+        if _syn_delay:
+            link_lines.append(f'{L}{{ output = "syn{_syn_name}:Out"  input = "dly{_syn_name}:In" }}')
+            gain_sources[_syn_name] = f"dly{_syn_name}:Out"
+        else:
+            gain_sources[_syn_name] = f"syn{_syn_name}:Out"
+
+    link_lines.append(f"{L}# → immersion gain")
     for ch in _HESUVI_CHANNELS:
-        link_lines.append(f'{L}{{ output = "copy{ch}:Out"  input = "gain{ch}:In" }}')
+        src = gain_sources.get(ch, f"copy{ch}:Out")
+        link_lines.append(f'{L}{{ output = "{src}"  input = "gain{ch}:In" }}')
 
     # gain → convolver links
     link_lines.append(f"{L}# gain → convolvers")
