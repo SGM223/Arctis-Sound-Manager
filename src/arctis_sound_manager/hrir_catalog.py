@@ -23,8 +23,36 @@ _GROUPS: list[tuple[str, list[str]]] = [
     ("OpenAL / DirectSound3D", ["oal_dflt", "oal_cia0", "oal_cia1", "oal+", "oal++", "oal+++", "ds3d", "ds3d+", "ds3d++", "ds3d+++"]),
     ("Nahimic", ["nahimic", "nahimic-"]),
     ("Spatial Sound Card", ["ssc_dub", "ssc_hu", "ssc_hu+", "ssc_ny", "ssc_ny+", "ssc_syd", "ssc_syd+"]),
+    ("SADIE II", ["sadie_h4", "sadie_h4+"]),
     ("None", ["none"]),
 ]
+
+# The catalogue now feeds two pickers: Spatial Audio profiles for headphones
+# and a separate one for channels routed to loudspeakers (the speaker_hrir_id
+# setting). A speaker-destined channel with "none" bypasses the surround chain
+# entirely — native playout — instead of convolving with a headphone HRTF.
+# The catalogue itself is not split — is_valid_hrir_id()/package_hrir_path()
+# still accept every bundled id, so a profile saved before the split keeps
+# resolving. Only what each picker lists changes.
+#
+# dvs/dvs+ are the entries HeSuVi's own info.csv marks as loudspeaker
+# profiles ("Do not use it with headphones, it is made for stereo
+# speakers!"), so they are offered on the speakers side only. "none" is the
+# explicit no-virtualization choice and stays available on both sides —
+# listing it keeps the speakers picker's default ("none") selectable.
+_SPEAKER_ONLY_IDS = frozenset({"dvs", "dvs+"})
+_SPEAKER_IDS = _SPEAKER_ONLY_IDS | {"none"}
+
+
+def _belongs_to(target: str, hrir_id: str) -> bool:
+    """True when *hrir_id* is offered by the *target* picker.
+
+    *target* is "headphones" (default) or "speakers"; anything else is
+    treated as "headphones" so a caller typo cannot empty the main picker.
+    """
+    if target == "speakers":
+        return hrir_id in _SPEAKER_IDS
+    return hrir_id not in _SPEAKER_ONLY_IDS
 
 
 # Convolution cost scales with the length of the impulse response, and this
@@ -76,41 +104,51 @@ def _parse_csv() -> dict[str, str]:
     return result
 
 
-def list_hrir_options_grouped() -> list[dict]:
-    """Return options with group info for grouped QComboBox display."""
+def list_hrir_options_grouped(target: str = "headphones") -> list[dict]:
+    """Return options with group info for grouped QComboBox display.
+
+    *target* selects the picker: "headphones" (default) or "speakers".
+    """
     catalog = _parse_csv()
     result: list[dict] = []
     seen: set[str] = set()
     for group_name, ids in _GROUPS:
         for hrir_id in ids:
-            if hrir_id in catalog:
+            if hrir_id in catalog and _belongs_to(target, hrir_id):
                 result.append({"id": hrir_id, "name": catalog[hrir_id], "group": group_name,
                                "cpu_cost": hrir_cpu_cost(hrir_id)})
                 seen.add(hrir_id)
     for hrir_id, desc in catalog.items():
-        if hrir_id not in seen:
+        if hrir_id not in seen and _belongs_to(target, hrir_id):
             result.append({"id": hrir_id, "name": desc, "group": "Other",
                            "cpu_cost": hrir_cpu_cost(hrir_id)})
     return result
 
 
-def list_hrir_options() -> list[dict]:
+def list_hrir_options(target: str = "headphones") -> list[dict]:
     """Flat list for D-Bus GetListOptions."""
     return [{"id": o["id"], "name": o["name"], "cpu_cost": o.get("cpu_cost")}
-            for o in list_hrir_options_grouped()]
+            for o in list_hrir_options_grouped(target)]
 
 
-def is_valid_hrir_id(hrir_id: str) -> bool:
+def is_valid_hrir_id(hrir_id: str, target: str | None = None) -> bool:
     """True if *hrir_id* is a real entry in the bundled catalogue.
 
     ``list_hrir_options()`` only ever lists ids matched against an actual
     ``<id>.wav`` file already sitting in ``_HRIR_DIR``, so this doubles as
     the boundary check for any hrir_id coming from outside the process — a
     D-Bus call or a hand-edited/restored settings file (CHA-12).
+
+    Without *target* every bundled id is accepted, including ids that are
+    only offered by one of the two pickers — a saved profile must keep
+    validating after the headphone/speaker split. Pass *target* to also
+    require membership in that picker's list.
     """
     if not isinstance(hrir_id, str):
         return False
-    return hrir_id in {o["id"] for o in list_hrir_options()}
+    if target is not None:
+        return hrir_id in {o["id"] for o in list_hrir_options(target)}
+    return hrir_id in _parse_csv()
 
 
 def package_hrir_path(hrir_id: str) -> Path | None:

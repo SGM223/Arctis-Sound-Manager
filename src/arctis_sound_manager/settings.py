@@ -302,6 +302,22 @@ class GeneralSettings(JsonSerializable):
     # loads, and enabling Spatial silences game/media (issue #100).
     hrir_id: str | None = "atmos"
 
+    # Spatial profile for channels routed to loudspeakers, kept separate from
+    # the headphone profile above: the two pickers offer different lists (see
+    # hrir_catalog._SPEAKER_IDS), so moving a channel between headset and
+    # speakers must not throw the other side's choice away. "none" (default)
+    # makes a speaker-destined channel bypass the surround chain and play
+    # natively — what a multichannel speaker setup wants; pick a profile only
+    # for stereo speakers that should be virtualised.
+    speaker_hrir_id: str | None = "none"
+
+    # Headphone compensation (InvHpTF) applied after the binaural mixdown:
+    # an AutoEq minimum-phase inverse of the headphone's response, so the
+    # spatial model is heard through flattened drivers instead of on top of
+    # their colourations. Only headphone-destined chains get it. "none"
+    # (default) leaves the generated surround chain byte-identical.
+    compensation_id: str | None = "none"
+
     # Which microphone source feeds the Sonar Micro EQ capture (issue #131).
     # "__auto__" (default) = Arctis microphone, matches the issue #127
     # enforcement behaviour. "__manual__" = the watchdog stops enforcing the
@@ -451,6 +467,8 @@ class GeneralSettings(JsonSerializable):
         ConfigSetting('generic_output_device', SettingType.SELECT, None, options_source='external_audio_devices', options_mapping={ 'value': 'id', 'label': 'description' }),
         ConfigSetting('generic_input_device', SettingType.SELECT, None, options_source='pulse_audio_sources', options_mapping={ 'value': 'id', 'label': 'description' }),
         ConfigSetting('hrir_id', SettingType.SELECT, None, options_source='hrir_files', options_mapping={ 'value': 'id', 'label': 'name' }),
+        ConfigSetting('speaker_hrir_id', SettingType.SELECT, None, options_source='hrir_files_speakers', options_mapping={ 'value': 'id', 'label': 'name' }),
+        ConfigSetting('compensation_id', SettingType.SELECT, None, options_source='compensation_files', options_mapping={ 'value': 'id', 'label': 'name' }),
         ConfigSetting('micro_input_source', SettingType.SELECT, "__auto__", options_source='pulse_audio_sources', options_mapping={ 'value': 'id', 'label': 'name' }),
         ConfigSetting('micro_alt_source', SettingType.SELECT, "", options_source='pulse_audio_sources', options_mapping={ 'value': 'id', 'label': 'name' }),
         # option_requires_status: value -> live status key(s) the active device
@@ -543,6 +561,29 @@ class GeneralSettings(JsonSerializable):
                     "not in the HRIR catalogue; using default."
                 )
                 del data['hrir_id']
+
+        # Same boundary for the speakers-side profile, checked against the
+        # picker that value has to come from.
+        if 'speaker_hrir_id' in data and data['speaker_hrir_id'] is not None:
+            from arctis_sound_manager.hrir_catalog import is_valid_hrir_id
+            if not is_valid_hrir_id(data['speaker_hrir_id'], target='speakers'):
+                logger.warning(
+                    f"general_settings.yaml: speaker_hrir_id="
+                    f"{data['speaker_hrir_id']!r} is not in the speakers "
+                    "HRIR catalogue; using default."
+                )
+                del data['speaker_hrir_id']
+
+        # And for the headphone compensation (InvHpTF) profile.
+        if 'compensation_id' in data and data['compensation_id'] is not None:
+            from arctis_sound_manager.compensation_catalog import is_valid_compensation_id
+            if not is_valid_compensation_id(data['compensation_id']):
+                logger.warning(
+                    f"general_settings.yaml: compensation_id="
+                    f"{data['compensation_id']!r} is not in the headphone "
+                    "compensation catalogue; using default."
+                )
+                del data['compensation_id']
 
         return GeneralSettings(**data)
 

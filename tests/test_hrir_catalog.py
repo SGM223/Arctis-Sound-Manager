@@ -66,3 +66,30 @@ def test_is_valid_hrir_id_accepts_only_catalogue_members():
     assert hrir_catalog.is_valid_hrir_id("../../../../etc/passwd") is False
     assert hrir_catalog.is_valid_hrir_id("not-a-real-id") is False
     assert hrir_catalog.is_valid_hrir_id(None) is False
+
+
+# ── the two pickers: speaker-only entries stay out of the headphone list ──
+
+def test_speaker_picker_lists_only_speaker_profiles():
+    ids = {o["id"] for o in hrir_catalog.list_hrir_options(target="speakers")}
+    assert {"dvs", "dvs+", "none"} <= ids
+    assert "atmos" not in ids
+    assert "sadie_h4" not in ids and "sadie_h4+" not in ids
+
+
+def test_headphone_picker_excludes_speaker_only_profiles():
+    ids = {o["id"] for o in hrir_catalog.list_hrir_options()}
+    assert "dvs" not in ids and "dvs+" not in ids
+    assert "none" in ids
+    assert "sadie_h4" in ids and "sadie_h4+" in ids
+
+
+def test_is_valid_hrir_id_target_scoping():
+    # Without target every bundled id stays valid, so a profile saved before
+    # the headphone/speaker split keeps resolving …
+    assert hrir_catalog.is_valid_hrir_id("dvs") is True
+    assert hrir_catalog.is_valid_hrir_id("atmos") is True
+    # … with target the id must belong to that picker's list.
+    assert hrir_catalog.is_valid_hrir_id("dvs", target="speakers") is True
+    assert hrir_catalog.is_valid_hrir_id("atmos", target="speakers") is False
+    assert hrir_catalog.is_valid_hrir_id("dvs", target="headphones") is False

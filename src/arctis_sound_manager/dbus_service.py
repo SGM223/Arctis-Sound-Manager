@@ -473,6 +473,39 @@ class ArctisManagerDbusSettingsService(ServiceInterface):
             apply_hrir_choice(value)
             return True
 
+        # Special case: speakers-side spatial profile. Validated against the
+        # Speakers picker's list (CHA-12's boundary, applied to the list this
+        # value can actually come from), then applied like hrir_id: channels
+        # the user routed to loudspeakers load this profile, and "none" makes
+        # them bypass the surround chain entirely (native passthrough).
+        if setting == 'speaker_hrir_id':
+            from arctis_sound_manager.hrir_catalog import is_valid_hrir_id
+            gs = self.core_engine.general_settings
+            if value is not None and (not isinstance(value, str)
+                                      or not is_valid_hrir_id(value, target='speakers')):
+                self.logger.error('SetSetting speaker_hrir_id: unknown id %r', value)
+                return False
+            gs.speaker_hrir_id = value or 'none'
+            gs.write_to_file()
+            from arctis_sound_manager.sonar_to_pipewire import apply_speaker_hrir_choice
+            apply_speaker_hrir_choice(gs.speaker_hrir_id)
+            return True
+
+        # Special case: headphone compensation (InvHpTF) profile. Applied like
+        # hrir_id — the compensation convolvers only read their WAV at load
+        # time, so the change has to reach the live graph, not just the file.
+        if setting == 'compensation_id':
+            from arctis_sound_manager.compensation_catalog import is_valid_compensation_id
+            gs = self.core_engine.general_settings
+            if value is not None and not is_valid_compensation_id(value):
+                self.logger.error('SetSetting compensation_id: unknown id %r', value)
+                return False
+            gs.compensation_id = value or 'none'
+            gs.write_to_file()
+            from arctis_sound_manager.sonar_to_pipewire import apply_compensation_choice
+            apply_compensation_choice(gs.compensation_id)
+            return True
+
         general_settings_keys = self.core_engine.general_settings.to_dict().keys()
         if setting in general_settings_keys:
             gs = self.core_engine.general_settings
@@ -625,6 +658,12 @@ class ArctisManagerDbusSettingsService(ServiceInterface):
         elif list_name == 'hrir_files':
             from arctis_sound_manager.hrir_catalog import list_hrir_options
             result = list_hrir_options()
+        elif list_name == 'hrir_files_speakers':
+            from arctis_sound_manager.hrir_catalog import list_hrir_options
+            result = list_hrir_options(target='speakers')
+        elif list_name == 'compensation_files':
+            from arctis_sound_manager.compensation_catalog import list_compensation_options
+            result = list_compensation_options()
         elif list_name == 'pulse_audio_sources':
             result = self._get_pulse_audio_sources_options()
         elif list_name == 'connected_arctis_devices':

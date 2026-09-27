@@ -140,3 +140,55 @@ def test_set_setting_accepts_catalogue_hrir_id(tmp_path):
     assert ok is True
     assert svc.core_engine.general_settings.hrir_id == "ssc_hu"
     apply_hrir.assert_called_once_with("ssc_hu")
+
+
+# ── speaker-side profile: same boundary, against the Speakers picker ──
+
+def test_set_setting_rejects_headphone_only_profile_for_speakers(tmp_path):
+    svc = _make_service(tmp_path)
+    with patch("arctis_sound_manager.settings.SETTINGS_FOLDER", tmp_path), \
+         patch("arctis_sound_manager.sonar_to_pipewire.apply_speaker_hrir_choice") as apply_spk:
+        ok = _set_setting(svc, "speaker_hrir_id", json.dumps("atmos"))
+
+    assert ok is False
+    # Falls back to the safe default — a headphone profile must not land in
+    # the speakers slot just because its WAV exists on disk.
+    assert svc.core_engine.general_settings.speaker_hrir_id == "none"
+    apply_spk.assert_not_called()
+
+
+def test_set_setting_accepts_speaker_catalogue_hrir_id(tmp_path):
+    svc = _make_service(tmp_path)
+    with patch("arctis_sound_manager.settings.SETTINGS_FOLDER", tmp_path), \
+         patch("arctis_sound_manager.sonar_to_pipewire.apply_speaker_hrir_choice") as apply_spk:
+        ok = _set_setting(svc, "speaker_hrir_id", json.dumps("dvs"))
+
+    assert ok is True
+    assert svc.core_engine.general_settings.speaker_hrir_id == "dvs"
+    # Applied right away, exactly like hrir_id: the change has to reach the
+    # live graph, not just the settings file.
+    apply_spk.assert_called_once_with("dvs")
+
+
+# ── compensation (InvHpTF) profile: same boundary, its own catalogue ──
+
+def test_set_setting_rejects_unknown_compensation_id(tmp_path):
+    svc = _make_service(tmp_path)
+    with patch("arctis_sound_manager.settings.SETTINGS_FOLDER", tmp_path), \
+         patch("arctis_sound_manager.sonar_to_pipewire.apply_compensation_choice") as apply_comp:
+        ok = _set_setting(svc, "compensation_id", json.dumps("atmos"))
+
+    assert ok is False
+    assert svc.core_engine.general_settings.compensation_id == "none"
+    apply_comp.assert_not_called()
+
+
+def test_set_setting_accepts_compensation_id(tmp_path):
+    svc = _make_service(tmp_path)
+    with patch("arctis_sound_manager.settings.SETTINGS_FOLDER", tmp_path), \
+         patch("arctis_sound_manager.sonar_to_pipewire.apply_compensation_choice") as apply_comp:
+        ok = _set_setting(svc, "compensation_id", json.dumps("arctis_5_2019"))
+
+    assert ok is True
+    assert svc.core_engine.general_settings.compensation_id == "arctis_5_2019"
+    apply_comp.assert_called_once_with("arctis_5_2019")

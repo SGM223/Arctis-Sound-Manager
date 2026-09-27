@@ -56,3 +56,5 @@ ssc_syd+;Spatial Sound Card with Sydney location and medium room envelope/n/nCAU
 waves;Waves NX
 waves-;Waves NX without reverb
 *;Unknown file! This file is probably a leftover from an older version of HeSuVi and has simply been renamed or replaced, you can manually delete it.
+sadie_h4;SADIE II H4 headphones, no room - free-field HRIR (University of York), 30°, 90°, 135°
+sadie_h4+;SADIE II H4 headphones, room - loudspeaker-room BRIR (University of York), 45°, 90°, 135°

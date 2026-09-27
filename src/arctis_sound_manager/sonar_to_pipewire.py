@@ -370,6 +370,82 @@ def _load_spatial_pct(channel: str) -> tuple[int, int]:
         return 50, 50
 
 
+def _load_speaker_hrir_id() -> str:
+    """The saved speaker-side HRIR profile, "none" when unset or unreadable.
+
+    Same file-based read as _load_spatial_pct(): the daemon, the GUI and the
+    config generator all need this value, and the YAML settings file is the
+    one place they can all see. "none" is the safe default — it means
+    speaker-destined channels play natively.
+    """
+    try:
+        from arctis_sound_manager.settings import GeneralSettings
+        return GeneralSettings.read_from_file().speaker_hrir_id or "none"
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("Could not read speaker_hrir_id: %s", exc)
+        return "none"
+
+
+def _channel_is_external(channel: str, data: list | None = None) -> bool:
+    """True when *channel* is routed to a device other than the headset.
+
+    channel_destination() falls back to the headset's physical output whenever
+    no present per-channel device is saved, so an inequality is exactly the
+    user's "send this channel to the speakers" choice — no new state to keep
+    in sync. Empty answers (no device attached) count as "not external".
+    """
+    physical = (_get_physical_out_chat() if channel == "chat"
+                else _get_physical_out_game())
+    dest = channel_destination(channel, data)
+    return bool(dest) and bool(physical) and dest != physical
+
+
+def _hrir_dest_for(channel: str) -> Path:
+    """Which materialised HRIR a channel's convolver nodes should load.
+
+    Headphone-destined channels use the headphone profile. A channel routed to
+    loudspeakers uses the speaker profile when one is selected — and with
+    "none" it does not run the chain at all (ensure_spatial_eq_links() links it
+    straight to the device), which is what a real multichannel setup wants:
+    native channels, layout negotiated by PipeWire, no virtualisation.
+    """
+    if _channel_is_external(channel) and _load_speaker_hrir_id() != "none":
+        return _SPEAKER_HRIR_DEST
+    return _HRIR_DEST
+
+
+def _load_compensation_id() -> str:
+    """The saved headphone compensation profile, "none" when unset/unreadable.
+
+    Same file-based read as _load_speaker_hrir_id(): the daemon, the GUI and
+    the config generator all need this value, and the YAML settings file is
+    the one place they can all see.
+    """
+    try:
+        from arctis_sound_manager.settings import GeneralSettings
+        return GeneralSettings.read_from_file().compensation_id or "none"
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("Could not read compensation_id: %s", exc)
+        return "none"
+
+
+def _compensation_dest_for(channel: str) -> Path | None:
+    """The compensation WAV *channel*'s chain should load, or None.
+
+    Only headphone-destined channels qualify: the filter is an inverse of a
+    *headphone's* response (an AutoEq measurement), so applying it to a chain
+    the user routed to loudspeakers would be the same category error as
+    convolving that chain with the headphone HRTF. A selected profile whose
+    WAV is missing degrades to "no compensation" instead of a convolver that
+    never loads (issue #100).
+    """
+    if _channel_is_external(channel):
+        return None
+    if _load_compensation_id() == "none":
+        return None
+    return _COMP_DEST if _COMP_DEST.exists() else None
+
+
 def _hesuvi_conf_has_spatial_drift(
     content: str, immersion_pct: int, distance_pct: int
 ) -> bool:
@@ -463,6 +539,19 @@ _DEFAULT_HRIR_ID = "atmos"
 # Where the HeSuVi convolver reads its impulse response from. generate_hesuvi_conf
 # writes this exact path into every convolver node.
 _HRIR_DEST = Path.home() / ".local" / "share" / "pipewire" / "hrir_hesuvi" / "hrir.wav"
+
+# The speaker-side counterpart. Channels the user routed to loudspeakers load
+# this instead of the headphone HRIR — the HRTF models a head, not a room, so
+# the headphone profile is the wrong correction once the destination is a real
+# speaker system (see _hrir_dest_for). Only materialised when a speaker
+# profile is selected; "none" makes those channels bypass the chain instead.
+_SPEAKER_HRIR_DEST = Path.home() / ".local" / "share" / "pipewire" / "hrir_hesuvi" / "hrir-speakers.wav"
+
+# Where the headphone compensation (InvHpTF) convolvers read their impulse
+# response from, when a profile is selected. Headphone-destined chains only —
+# compensating a loudspeaker route with an inverse *headphone* response is as
+# wrong as convolving it with the headphone HRTF (see _compensation_dest_for).
+_COMP_DEST = Path.home() / ".local" / "share" / "pipewire" / "hrir_hesuvi" / "compensation.wav"
 
 
 def _get_physical_out() -> str:
@@ -1367,6 +1456,145 @@ def apply_hrir_choice(hrir_id: str | None) -> None:
         _log.info("HRIR changed → %s", src.name)
     _restart_filter_chain()
     ensure_spatial_eq_links(spatial_channels())
+
+
+def ensure_speaker_hrir_materialized(speaker_hrir_id: str | None = None) -> bool:
+    """Guarantee the speaker-side HRIR WAV exists when a profile is selected.
+
+    Mirror of :func:`ensure_hrir_materialized` for channels routed to
+    loudspeakers: generate_hesuvi_conf() points those convolvers at
+    :data:`_SPEAKER_HRIR_DEST`, and a missing file would keep their chain from
+    loading — the issue #100 failure mode. "none" has no file on purpose:
+    such channels bypass the surround chain instead.
+
+    Idempotent and never overwrites an existing WAV, so it does not fight a
+    user's explicit profile choice. Returns True if it wrote the file.
+    """
+    if speaker_hrir_id is None:
+        speaker_hrir_id = _load_speaker_hrir_id()
+    if not speaker_hrir_id or speaker_hrir_id == "none":
+        return False
+    try:
+        if _SPEAKER_HRIR_DEST.exists() and _SPEAKER_HRIR_DEST.stat().st_size > 0:
+            return False
+    except OSError:
+        pass
+
+    from arctis_sound_manager.hrir_catalog import package_hrir_path
+    src = package_hrir_path(speaker_hrir_id)
+    if src is None:
+        _log.warning("No bundled HRIR for speaker profile %r", speaker_hrir_id)
+        return False
+
+    import shutil
+    try:
+        _SPEAKER_HRIR_DEST.parent.mkdir(parents=True, exist_ok=True)
+        _SPEAKER_HRIR_DEST.unlink(missing_ok=True)
+        shutil.copy(src, _SPEAKER_HRIR_DEST)
+        _log.info("Materialised speaker HRIR %s → %s", src.stem, _SPEAKER_HRIR_DEST)
+        return True
+    except OSError as exc:
+        _log.warning("Failed to materialise speaker HRIR WAV: %s", exc)
+        return False
+
+
+def apply_speaker_hrir_choice(speaker_hrir_id: str | None) -> None:
+    """Materialise the speaker-side HRIR and make the change take effect.
+
+    Two things move with this setting: the WAV a speaker-destined channel's
+    convolvers load, and — for "none" — whether those channels run the
+    surround chain at all. The conf text only changes in the bypass case, so
+    it is regenerated from the destination first and the filter-chain is
+    restarted for the WAV itself, exactly the apply_hrir_choice() pattern.
+
+    A falsy value falls back to "none" (bypass), never to the headphone
+    profile: silently convolving a speaker route with a headphone HRIR is the
+    bug this setting exists to prevent.
+    """
+    import shutil
+    from arctis_sound_manager.hrir_catalog import package_hrir_path
+    speaker_hrir_id = speaker_hrir_id or "none"
+    src = package_hrir_path(speaker_hrir_id) if speaker_hrir_id != "none" else None
+    if src is not None:
+        _SPEAKER_HRIR_DEST.parent.mkdir(parents=True, exist_ok=True)
+        _SPEAKER_HRIR_DEST.unlink(missing_ok=True)  # remove read-only copies (e.g. from Nix store)
+        shutil.copy(src, _SPEAKER_HRIR_DEST)
+        _log.info("Speaker HRIR changed → %s", src.name)
+    elif speaker_hrir_id != "none":
+        _log.warning("HRIR WAV not found for speaker id: %s", speaker_hrir_id)
+
+    # Bypass state changed for any speaker-destined channel? Rewrite the
+    # surround confs, then restart so the new (or dropped) WAV is loaded.
+    regenerate_hesuvi_if_changed()
+    _restart_filter_chain()
+    ensure_spatial_eq_links(spatial_channels())
+    ensure_physical_output_links()
+
+
+def ensure_compensation_materialized(compensation_id: str | None = None) -> bool:
+    """Guarantee the compensation WAV exists when a profile is selected.
+
+    Mirror of :func:`ensure_hrir_materialized` for the InvHpTF layer: the
+    generator only emits the compensation nodes when
+    :data:`_COMP_DEST` exists, so a missing file degrades to "no
+    compensation" rather than the dead-chain failure mode of issue #100.
+    Idempotent, never overwrites an existing WAV, and "none" is a no-op
+    (there is no file to materialise). Returns True if it wrote the file.
+    """
+    if compensation_id is None:
+        compensation_id = _load_compensation_id()
+    if not compensation_id or compensation_id == "none":
+        return False
+    try:
+        if _COMP_DEST.exists() and _COMP_DEST.stat().st_size > 0:
+            return False
+    except OSError:
+        pass
+
+    from arctis_sound_manager.compensation_catalog import package_compensation_path
+    src = package_compensation_path(compensation_id)
+    if src is None:
+        _log.warning("No bundled compensation WAV for id %r", compensation_id)
+        return False
+
+    import shutil
+    try:
+        _COMP_DEST.parent.mkdir(parents=True, exist_ok=True)
+        _COMP_DEST.unlink(missing_ok=True)
+        shutil.copy(src, _COMP_DEST)
+        _log.info("Materialised compensation %s → %s", src.stem, _COMP_DEST)
+        return True
+    except OSError as exc:
+        _log.warning("Failed to materialise compensation WAV: %s", exc)
+        return False
+
+
+def apply_compensation_choice(compensation_id: str | None) -> None:
+    """Materialise the chosen compensation FIR and make it live.
+
+    The convolvers read their WAV once, at load time, so this follows the
+    apply_hrir_choice() pattern: regenerate the surround confs (the nodes
+    appear/disappear when the layer is switched on/off), restart the
+    filter-chain for the WAV itself, then re-own the links the restart tore
+    down. "none" leaves no file behind — the generated chain simply has no
+    compensation stage.
+    """
+    import shutil
+    from arctis_sound_manager.compensation_catalog import package_compensation_path
+    compensation_id = compensation_id or "none"
+    src = package_compensation_path(compensation_id) if compensation_id != "none" else None
+    if src is not None:
+        _COMP_DEST.parent.mkdir(parents=True, exist_ok=True)
+        _COMP_DEST.unlink(missing_ok=True)  # remove read-only copies (e.g. from Nix store)
+        shutil.copy(src, _COMP_DEST)
+        _log.info("Headphone compensation changed → %s", src.name)
+    elif compensation_id != "none":
+        _log.warning("Compensation WAV not found for id: %s", compensation_id)
+
+    regenerate_hesuvi_if_changed()
+    _restart_filter_chain()
+    ensure_spatial_eq_links(spatial_channels())
+    ensure_physical_output_links()
 
 
 # ── Config generator — game / chat ────────────────────────────────────────────
@@ -3173,6 +3401,15 @@ def check_and_fix_stale_configs() -> tuple[bool, bool]:
         # the file at load), so flag `fixed` to trigger one.
         if ensure_hrir_materialized():
             fixed = True
+        # Same guarantee for the speaker-side profile: a channel routed to
+        # loudspeakers points its convolvers at _SPEAKER_HRIR_DEST when one is
+        # selected, so that WAV has to exist before the conf references it.
+        if ensure_speaker_hrir_materialized():
+            fixed = True
+        # And for the compensation layer: a selected profile must exist before
+        # the conf references its WAV.
+        if ensure_compensation_materialized():
+            fixed = True
         # Regenerate each channel's HeSuVi chain (issue #169). Game keeps the
         # historical un-suffixed conf; Media has its own …-hesuvi-media.conf.
         # Each is sourced from its own sonar_spatial_audio*.json, so the two
@@ -3285,6 +3522,8 @@ def regenerate_hesuvi_if_changed() -> bool:
     # A slider move can't require a new HRIR, but keep this idempotent with the
     # daemon-init path so a first-ever generation here still has its WAV staged.
     ensure_hrir_materialized()
+    ensure_speaker_hrir_materialized()
+    ensure_compensation_materialized()
     changed = False
     for channel in spatial_channels():
         immersion_pct, distance_pct = _load_spatial_pct(channel)
@@ -3560,6 +3799,16 @@ def ensure_spatial_eq_links(
         if channel not in spatial_channels():
             continue
         enabled = _spatial_enabled(channel)
+        # A channel the user routed to loudspeakers does not wear the
+        # headphone HRIR: an HRTF models a head, not a room. With a speaker
+        # profile selected its chain convolves with that instead (the
+        # generator already picked the file); with "none" it bypasses the
+        # surround chain entirely and plays natively — what a real
+        # multichannel speaker setup wants, with PipeWire negotiating the
+        # layout. No new state: the destination and the profile are both read
+        # from what is already on disk.
+        if enabled and _channel_is_external(channel, data) and _load_speaker_hrir_id() == "none":
+            enabled = False
         # Each channel links to its OWN HeSuVi chain (issue #169): Game keeps the
         # historical un-suffixed node, Media routes to effect_input.…-hesuvi-media,
         # so their independent Immersion/Distance never bleed into each other.
@@ -4038,7 +4287,7 @@ def generate_hesuvi_conf(
         )
 
     # 3. Convolver nodes
-    hrir_path = _HRIR_DEST  # ensure_hrir_materialized() guarantees this exists
+    hrir_path = _hrir_dest_for(channel)  # ensure_*_materialized() guarantees this exists
     node_lines.append(f"{I}# apply hrir — HeSuVi 14-channel WAV")
     for conv_name, ch_idx in _HESUVI_CONVOLVERS:
         node_lines.append(
@@ -4051,7 +4300,21 @@ def generate_hesuvi_conf(
     node_lines.append(f"{I}{{ type = builtin  label = mixer  name = mixL }}")
     node_lines.append(f"{I}{{ type = builtin  label = mixer  name = mixR }}")
 
-    # 5. Plate reverb nodes (Distance) — only if distance_pct > 0 and swh-plugins available
+    # 5. Headphone compensation (InvHpTF) — two stereo convolvers after the
+    #    binaural mixdown, one per ear, loading the same mono-source IR. Only
+    #    emitted when a profile is selected, its WAV is materialised and the
+    #    channel is headphone-destined (see _compensation_dest_for) — the
+    #    default chain stays byte-identical.
+    comp_path = _compensation_dest_for(channel)
+    if comp_path is not None:
+        node_lines.append(f"{I}# headphone compensation (InvHpTF)")
+        for _comp_node in ("compL", "compR"):
+            node_lines.append(
+                f'{I}{{ type = builtin  label = convolver  name = {_comp_node}'
+                f'  config = {{ filename = "{comp_path}" channel = 0 }} }}'
+            )
+
+    # 6. Plate reverb nodes (Distance) — only if distance_pct > 0 and swh-plugins available
     _plate_ref = _ladspa_plugin_ref("plate_1423.so") if distance_pct > 0 else None
     use_plate = _plate_ref is not None
     if use_plate:
@@ -4065,7 +4328,7 @@ def generate_hesuvi_conf(
             f'  control = {{ "Reverb time" = 2.5  "Damping" = 0.5  "Dry/wet mix" = {distance_wet:.2f} }} }}'
         )
 
-    # 6. Output limiter (independent of Distance) — prevents hot HRIRs
+    # 7. Output limiter (independent of Distance) — prevents hot HRIRs
     #    (e.g. Nahimic 3) from clipping on loud passages. The Immersion slider
     #    adds up to +12 dB broadband *before* the HRTF convolution, and each
     #    stereo mixer sums four convolvers, so peaks can exceed 0 dBFS with no
@@ -4108,18 +4371,29 @@ def generate_hesuvi_conf(
             f'{L}{{ output = "{conv_name}:Out"  input = "{mixer}:In {idx}" }}'
         )
 
+    # Compensation (when active) sits between the mixers and whatever follows
+    # (reverb, limiter, output); otherwise the mixers feed the rest directly.
+    stage_l, stage_r = (
+        ("compL:Out", "compR:Out") if comp_path is not None
+        else ("mixL:Out", "mixR:Out")
+    )
+    if comp_path is not None:
+        link_lines.append(f"{L}# mixers → compensation")
+        link_lines.append(f'{L}{{ output = "mixL:Out"  input = "compL:In" }}')
+        link_lines.append(f'{L}{{ output = "mixR:Out"  input = "compR:In" }}')
+
     if use_plate:
-        # mixer → plate reverb links
-        link_lines.append(f"{L}# mixers → plate reverb")
-        link_lines.append(f'{L}{{ output = "mixL:Out"  input = "plate_L:Input" }}')
-        link_lines.append(f'{L}{{ output = "mixR:Out"  input = "plate_R:Input" }}')
+        # last stage → plate reverb links
+        link_lines.append(f"{L}# → plate reverb")
+        link_lines.append(f'{L}{{ output = "{stage_l}"  input = "plate_L:Input" }}')
+        link_lines.append(f'{L}{{ output = "{stage_r}"  input = "plate_R:Input" }}')
 
     # Final stereo pair feeding the sink: plate reverb outputs when reverb is
-    # active, otherwise the raw stereo mixers.
+    # active, otherwise the last convolution stage.
     pre_out_l, pre_out_r = (
         ("plate_L:Left output", "plate_R:Right output")
         if use_plate else
-        ("mixL:Out", "mixR:Out")
+        (stage_l, stage_r)
     )
 
     if use_limiter:
