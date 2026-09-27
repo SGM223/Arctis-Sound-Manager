@@ -192,3 +192,15 @@ def test_set_setting_accepts_compensation_id(tmp_path):
     assert ok is True
     assert svc.core_engine.general_settings.compensation_id == "arctis_5_2019"
     apply_comp.assert_called_once_with("arctis_5_2019")
+
+
+def test_set_setting_applies_upmix_stereo(tmp_path):
+    """The switch changes the HeSuVi conf's shape, so it must regenerate."""
+    svc = _make_service(tmp_path)
+    with patch("arctis_sound_manager.settings.SETTINGS_FOLDER", tmp_path), \
+         patch("arctis_sound_manager.sonar_to_pipewire.apply_spatial_audio_change") as apply_spatial:
+        ok = _set_setting(svc, "upmix_stereo", json.dumps(False))
+
+    assert ok is True
+    assert svc.core_engine.general_settings.upmix_stereo is False
+    apply_spatial.assert_called_once_with()

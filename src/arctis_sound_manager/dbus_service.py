@@ -506,6 +506,21 @@ class ArctisManagerDbusSettingsService(ServiceInterface):
             apply_compensation_choice(gs.compensation_id)
             return True
 
+        # Special case: the stereo-upmix switch changes what the HeSuVi conf
+        # contains (the matrix synthesizer nodes are emitted or not), so it
+        # needs the regenerate-and-restart dance a slider move gets — the
+        # generic path would only write the value.
+        if setting == 'upmix_stereo':
+            if not isinstance(value, bool):
+                self.logger.error('SetSetting upmix_stereo: value %r rejected', value)
+                return False
+            gs = self.core_engine.general_settings
+            gs.upmix_stereo = value
+            gs.write_to_file()
+            from arctis_sound_manager.sonar_to_pipewire import apply_spatial_audio_change
+            apply_spatial_audio_change()
+            return True
+
         general_settings_keys = self.core_engine.general_settings.to_dict().keys()
         if setting in general_settings_keys:
             gs = self.core_engine.general_settings
